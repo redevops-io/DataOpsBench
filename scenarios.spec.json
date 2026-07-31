@@ -1,0 +1,29 @@
+{
+  "id": "S03",
+  "title": "Duplicate policy records after a retried load",
+  "defect": "A retried load re-inserted 8 policy rows; counts and premium totals are inflated.",
+  "deterministic_gates": [
+    "no duplicate policy_id",
+    "distinct-policy count",
+    "premium total after dedup"
+  ]
+}
+{
+  "id": "S10",
+  "title": "Source and finance totals disagree",
+  "defect": "finance_report SUMs over a commissions join that fans out; totals double-count.",
+  "deterministic_gates": [
+    "source total unchanged",
+    "finance reconciles to source within tolerance"
+  ]
+}
+{
+  "id": "S14",
+  "title": "Lineage breaks after a table rename",
+  "defect": "'customers' was renamed to 'dim_customer'; downstream views still reference the old name.",
+  "deterministic_gates": [
+    "downstream views execute",
+    "lineage edges restored",
+    "no stale reference"
+  ]
+}
