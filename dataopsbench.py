@@ -275,6 +275,83 @@ def s14l_localize_verify(conn, found_broken) -> dict:
             "broken_gt": len(gtb), "found": len(fb)}
 
 
+# =====================================================================================================
+# S21 — Cross-source reconciliation-CONFLICT detection (the acquisition problem). Operating a platform
+# with an acquired source (Northstar + Meridian) is not "can you consolidate?" (S20) but "do you surface
+# every reconciliation conflict the merge introduces?" — the same logical metric reported with different
+# values across the two source systems (different currency / definition, not a benign FX conversion).
+# `conflicts` metric pairs disagree on purpose, hidden among `scale` single-source metrics. The two source
+# systems are laid out as separate blocks (as on Spark: Northstar modules on some executors, Meridian on
+# others), so a conflict NEVER lives inside one bounded working set — it only surfaces at the cross-source
+# union. The distinction is the union KEY: a value-keyed union (S20-style) merges a disagreement silently
+# as two benign facts; a metric-keyed contradiction detector flags same-metric/different-value as a
+# CONFLICT. Deterministic gate (recall/precision), no model required.
+# =====================================================================================================
+_METRIC = re.compile(r"-- metric:\s*(\w+)\s*=\s*(\d+\s+\w+)")
+
+def s21_build(scale: int = 60, conflicts: int | None = None) -> sqlite3.Connection:
+    if conflicts is None: conflicts = max(2, scale // 20)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE pipeline (ord INTEGER, name TEXT, source TEXT, sql TEXT)")
+    amts = _ints(scale, 1000, 9000)
+    ord_ = 0
+    # Northstar block: (scale - conflicts) reconciled single-source metrics + the northstar side of each conflict
+    for i in range(scale - conflicts):
+        v = f"ns_rev_{i:04d}"
+        conn.execute("INSERT INTO pipeline VALUES (?,?,?,?)", (ord_, v, "northstar",
+            f"-- owner: team_{i % 6}\n{_COLDICT}\nCREATE VIEW {v} AS SELECT amount FROM northstar_src_{i};\n"
+            f"-- metric: m_{i} = {amts[i]} USD")); ord_ += 1
+    for j in range(conflicts):
+        v = f"ns_c_{j:04d}"
+        conn.execute("INSERT INTO pipeline VALUES (?,?,?,?)", (ord_, v, "northstar",
+            f"-- owner: team_{j % 6}\n{_COLDICT}\nCREATE VIEW {v} AS SELECT amount FROM northstar_src;\n"
+            f"-- metric: cm_{j} = {1200 + j} USD")); ord_ += 1
+    # Meridian block: the acquired side of each conflict — SAME metric key cm_j, different value + currency
+    for j in range(conflicts):
+        v = f"md_c_{j:04d}"
+        conn.execute("INSERT INTO pipeline VALUES (?,?,?,?)", (ord_, v, "meridian",
+            f"-- owner: acq_team_{j % 4}\n{_COLDICT}\nCREATE VIEW {v} AS SELECT total FROM meridian_src;\n"
+            f"-- metric: cm_{j} = {1080 + j} EUR")); ord_ += 1
+    set_gt(conn, {"conflicts": [f"cm_{j}" for j in range(conflicts)], "scale": scale, "n_conflicts": conflicts})
+    conn.commit()
+    return conn
+
+def s21_artifacts(conn) -> list[tuple[str, str, str]]:
+    """[(name, source_system, sql)] in platform order — Northstar block then Meridian block."""
+    return [(r[0], r[1], r[2]) for r in conn.execute("SELECT name, source, sql FROM pipeline ORDER BY ord")]
+
+def s21_metrics(text: str) -> dict[str, str]:
+    """Deterministic keyed extraction (shared by both arms): {logical_metric: 'value currency'}."""
+    return {m.group(1): m.group(2) for m in _METRIC.finditer(text)}
+
+def s21_detect(chunk_maps: list[dict[str, str]], keyed: bool) -> set[str]:
+    """Union bounded per-chunk facts into a store, then flag any store key carrying >1 distinct value.
+    Both arms run the SAME detection — only the store KEY differs (this is the whole point):
+      keyed=False — value-keyed union (S20-style): the key is 'metric|value', so a disagreement splits into
+                    two DIFFERENT keys (each with one value). No key ever carries >1 value -> 0 conflicts:
+                    the contradiction reconciled silently.
+      keyed=True  — metric-keyed contradiction detector (merge()): the key is the logical metric, so the two
+                    source values collide under one key -> flagged as a CONFLICT."""
+    store: dict[str, set[str]] = {}
+    for cm in chunk_maps:
+        for metric, value in cm.items():
+            k = metric if keyed else f"{metric}|{value}"
+            store.setdefault(k, set()).add(value)
+    flagged = {k for k, vs in store.items() if len(vs) > 1}
+    return flagged if keyed else {k.split("|", 1)[0] for k in flagged}  # naive: none survive the >1 test
+
+def s21_verify(conn, found_conflicts, completed: bool) -> dict:
+    gt = set(get_gt(conn)["conflicts"]); fc = set(found_conflicts)
+    recall = len(fc & gt) / len(gt) if gt else 1.0
+    precision = len(fc & gt) / len(fc) if fc else 1.0
+    return _result([
+        ("completed (no context overflow)", completed),
+        ("conflict recall == 1.0", recall == 1.0),
+        ("conflict precision == 1.0", precision == 1.0),
+    ]) | {"recall": round(recall, 3), "precision": round(precision, 3),
+          "conflicts_gt": len(gt), "found": len(fc)}
+
+
 # --- registry + gate machinery -------------------------------------------------------------------------
 def _result(checks: list[tuple[str, bool]]) -> dict:
     return {"passed": all(ok for _, ok in checks), "checks": checks}
@@ -321,7 +398,20 @@ def validate() -> int:
     ok_all &= s20_ok; n_ok += int(s20_ok)
     print("S20  Massive cross-source consolidation (overload gate)  ->  "
           + ("OK (gate discriminates: empty extraction fails, perfect passes)" if s20_ok else "BROKEN") + "\n")
-    print(f"RESULT {n_ok}/{len(SCENARIOS) + 1} scenarios validate")
+    # S21 reconciliation-conflict gate — deterministic self-check (no model): the metric-keyed detector must
+    # surface every seeded cross-source conflict at precision 1.0; the value-keyed union must surface none.
+    c21 = s21_build(60, 5)
+    maps = [s21_metrics(sql) for _, _, sql in s21_artifacts(c21)]
+    runtime = s21_verify(c21, s21_detect(maps, keyed=True), True)
+    naive = s21_verify(c21, s21_detect(maps, keyed=False), True)
+    clean = s21_verify(s21_build(60, 0), s21_detect([s21_metrics(s) for _, _, s in s21_artifacts(s21_build(60, 0))], keyed=True), True)
+    s21_ok = runtime["passed"] and (not naive["passed"]) and naive["recall"] == 0.0 and clean["passed"]
+    ok_all &= s21_ok; n_ok += int(s21_ok)
+    print("S21  Cross-source reconciliation-conflict detection (acquisition gate)  ->  "
+          + (f"OK (metric-keyed merge recall {runtime['recall']}/prec {runtime['precision']}; "
+             f"value-keyed union recall {naive['recall']}; clean-platform precision {clean['precision']})"
+             if s21_ok else "BROKEN") + "\n")
+    print(f"RESULT {n_ok}/{len(SCENARIOS) + 2} scenarios validate")
     return 0 if ok_all else 1
 
 def spec(which: str | None):

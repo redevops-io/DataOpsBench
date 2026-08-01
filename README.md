@@ -34,9 +34,10 @@ fails them, the reference fix passes them all. A gate that passed on the defect 
 | **S14** | lineage | lineage breaks after a table rename | downstream views execute · lineage edges restored |
 | **S14L** | repair @ scale | one table renamed, broken refs hidden across `scale` pipelines — localize them all | localization recall / precision |
 | **S20** | consolidation @ scale | consolidate cross-source (USD + EUR) lineage + reconcile a normalized total; `scale` grows past the window | lineage recall 1.0 · reconciled total within tolerance |
+| **S21** | reconciliation-conflict @ scale | an acquired source (Northstar + Meridian) reports the *same* logical metric with *different* values; detect every cross-source conflict, hidden among `scale` clean metrics | conflict recall 1.0 · precision 1.0 · no overflow |
 
 Platforms are **fully synthetic** (deterministic generators — reproducible ground truth, no external data).
-`scale` on S14L/S20 is the overload dial: it grows the platform text past a model's context window.
+`scale` on S14L/S20/S21 is the overload dial: it grows the platform text past a model's context window.
 
 ## Run the reference solvers
 
@@ -47,6 +48,7 @@ export QWEN_URL=http://localhost:8000 QWEN_MODEL=your-model     # the arm model
 python3 run_arm.py                        # repair scenarios S03/S10/S14 (Arm A, direct)
 python3 run_arm.py s20  20 60 120         # consolidation under overload: direct vs bounded reference
 python3 run_arm.py s14l 20 60 120         # localization at scale: direct vs deterministic reference
+python3 run_arm.py s21  20 100 300 600    # reconciliation-conflict: direct vs naive-union vs metric-keyed merge
 
 # judge-graded family (report quality). arms + a DIFFERENT-family judge, blinded pairwise:
 export JUDGE_URL=http://localhost:8001 JUDGE_MODEL=your-judge-model
@@ -65,6 +67,7 @@ for every solver:
 
 - **repair** (S03/S10/S14): return `{artifact_name: corrected_sql}`; scored by `<scenario>_verify(conn)`.
 - **consolidation** (S20): return `facts = [[view, source, amount, currency], ...]`; scored by `s20_verify`.
+- **reconciliation-conflict** (S21): return the list of metric names in conflict across sources; scored by `s21_verify`. A value-keyed union reconciles disagreements silently (recall 0); only a metric-keyed contradiction detector surfaces them — the same working set on each side, only the union key differs.
 - **localization** (S14L): return the list of broken view names; scored by `s14l_localize_verify`.
 - **report** (judge family): return a markdown incident report; scored by a deterministic groundedness gate
   first, then a blinded pairwise judge from a *different* model family.

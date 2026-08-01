@@ -22,7 +22,8 @@ from the environment.
 from __future__ import annotations
 import json, os, re, sys, urllib.request
 from dataopsbench import (SCENARIOS, _pipeline, _set_artifact, s20_build, s20_artifacts, s20_verify,
-                          s14l_build, s14l_known_tables, s14l_localize_verify)
+                          s14l_build, s14l_known_tables, s14l_localize_verify,
+                          s21_build, s21_artifacts, s21_metrics, s21_detect, s21_verify)
 
 URL = os.environ.get("QWEN_URL", "http://localhost:8000")
 MODEL = os.environ.get("QWEN_MODEL", "your-model")
@@ -44,8 +45,19 @@ def _chat(system, user, max_tokens):
 def _json_obj(text):
     if text is None: return {}
     t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```")
-    m = re.search(r"\{.*\}", t, re.DOTALL)
-    return json.loads(m.group(0)) if m else {}
+    # Take the LAST top-level balanced {...} that parses. Robust to models that emit prose or an inline
+    # reasoning trace around the answer (the final JSON is the answer; earlier braces are the scratch work).
+    depth, start, last = 0, -1, None
+    for i, ch in enumerate(t):
+        if ch == "{":
+            if depth == 0: start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try: last = json.loads(t[start:i + 1])
+                except Exception: pass
+    return last if last is not None else {}
 
 # ---- repair scenarios (Arm A) -------------------------------------------------------------------------
 REPAIR_SYS = ("You are a senior data engineer. Fix the broken data pipeline by rewriting the SQL of the "
@@ -124,9 +136,43 @@ def s14l_sweep(scales):
               f"{('OVERFLOW' if a_ovf else 'ok'):>9} | {b['recall']:>9}")
     print("\n(Direct localization overflows as the platform grows; a bounded scan finds every broken ref at any scale.)")
 
+# ---- S21 reconciliation-conflict detection: Arm A (direct) vs Arm B (naive union / runtime merge) -----
+CONFLICT_SYS = ("Two source systems (northstar, meridian) were merged. Each view declares one metric in a "
+                "'-- metric: NAME = VALUE CURRENCY' comment. List EVERY metric NAME that is declared with "
+                "DIFFERENT values across the two systems (a reconciliation conflict). "
+                "Return ONLY JSON {\"conflicts\": [name, ...]}.")
+
+def s21_sweep(scales, budget=20000):
+    print(f"S21 cross-source reconciliation-conflict detection · direct vs naive-union vs runtime-merge · model={MODEL}\n")
+    print(f"{'scale':>6} {'ctx~tok':>8} {'seed':>5} | {'A done':>6} {'A rec':>6} | {'naive rec':>9} | {'merge rec':>9} {'merge prec':>10}")
+    for sc in scales:
+        conf = max(2, sc // 20)
+        ca = s21_build(sc, conf)
+        arts = s21_artifacts(ca)
+        # Arm A — direct model over the whole merged platform (overflows once it exceeds the window)
+        text = "\n\n".join(f"{n} [{src}]:\n{sql}" for n, src, sql in arts)
+        c, a_ovf = _chat(CONFLICT_SYS, text, 6000)   # headroom for an inline reasoning trace + the JSON answer
+        a = s21_verify(ca, _json_obj(c).get("conflicts", []) if not a_ovf else [], not a_ovf)
+        # Arm B — bounded working sets, chunked PER SOURCE SYSTEM (a chunk never spans northstar+meridian,
+        # exactly as on Spark: northstar modules on some executors, meridian on others). The two sides of a
+        # conflict therefore always land in different maps; the disagreement surfaces only at the driver union.
+        cap = int(budget * 4 * 0.5)
+        ns = _chunks([(n, sql) for n, src, sql in arts if src == "northstar"], cap)
+        md = _chunks([(n, sql) for n, src, sql in arts if src == "meridian"], cap)
+        maps = [s21_metrics("\n".join(s for _, s in g)) for g in ns + md]
+        naive = s21_verify(ca, s21_detect(maps, keyed=False), True)       # value-keyed union: silent
+        merge = s21_verify(ca, s21_detect(maps, keyed=True), True)        # metric-keyed merge(): surfaces all
+        approx = sum(len(s) for _, _, s in arts) // 4
+        print(f"{sc:>6} {approx:>8} {conf:>5} | {str(not a_ovf):>6} {(0.0 if a_ovf else a['recall']):>6} | "
+              f"{naive['recall']:>9} | {merge['recall']:>9} {merge['precision']:>10}")
+    print("\n(Direct overflows as the merged platform grows; a value-keyed union reconciles every disagreement")
+    print(" SILENTLY (recall 0); only the metric-keyed merge() surfaces all conflicts at precision 1.0, 0-overflow.)")
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "s20":
         sys.exit(s20_sweep([int(x) for x in sys.argv[2:]] or [20, 60, 120]))
     if len(sys.argv) > 1 and sys.argv[1] == "s14l":
         sys.exit(s14l_sweep([int(x) for x in sys.argv[2:]] or [20, 60, 120]))
+    if len(sys.argv) > 1 and sys.argv[1] == "s21":
+        sys.exit(s21_sweep([int(x) for x in sys.argv[2:]] or [20, 60, 120]))
     sys.exit(run([a for a in sys.argv[1:] if a in SCENARIOS] or list(SCENARIOS)))
