@@ -18,3 +18,8 @@ executors extract keyed facts from bounded single-source groups; the driver owns
 {"scenario":"S21","scale":20,  "seeded_conflicts":2,  "executor_tasks":4,  "naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}
 {"scenario":"S21","scale":200, "seeded_conflicts":10, "executor_tasks":27, "naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}
 {"scenario":"S21","scale":2000,"seeded_conflicts":100,"executor_tasks":263,"naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}
+
+Note — the arm sweep above is pure Python (any Python 3). The distributed Spark form needs a JVM that
+still carries the Security Manager: Spark 4.0.0 runs on JDK 17 (the apache/spark:4.0.0 image ships it) but
+fails on JDK 24/25 with "UnsupportedOperationException: getSubject is not supported" (Hadoop
+UserGroupInformation), and -Djava.security.manager=allow won't even start a JDK 25 VM. Run Spark on JDK 17.
