@@ -1,0 +1,20 @@
+S21 — cross-source reconciliation-conflict detection, run on a proxmox k3s cluster.
+
+Arm sweep (python3 run_arm.py s21 20 100 300 600), Arm A = an in-cluster 64K-context model:
+
+ scale  ctx~tok  seed | A done  A rec | naive rec | merge rec merge prec
+    20     9302     2 |   True    1.0 |       0.0 |       1.0        1.0
+   100    44426     5 |   True    1.0 |       0.0 |       1.0        1.0
+   300   133383    15 |  False    0.0 |       0.0 |       1.0        1.0
+   600   266827    30 |  False    0.0 |       0.0 |       1.0        1.0
+
+Three separable outcomes: the direct model is correct but context-bounded (overflows past its window at
+scale 300); the naive value-keyed union scales but is silently wrong (recall 0 even at scale 20 — it
+reconciles every disagreement away); only the metric-keyed merge() is both correct and scale-free.
+
+Distributed on Spark (single pod, apache/spark:4.0.0, JDK 17, master local[4], AppArmor Unconfined) —
+executors extract keyed facts from bounded single-source groups; the driver owns the cross-source union:
+
+{"scenario":"S21","scale":20,  "seeded_conflicts":2,  "executor_tasks":4,  "naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}
+{"scenario":"S21","scale":200, "seeded_conflicts":10, "executor_tasks":27, "naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}
+{"scenario":"S21","scale":2000,"seeded_conflicts":100,"executor_tasks":263,"naive_recall":0,"governed_recall":1,"governed_precision":1,"model_calls":0}

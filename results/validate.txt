@@ -1,3 +1,6 @@
 $ python3 dataopsbench.py validate      # deterministic — no API keys, no model calls
-RESULT 4/4 scenarios validate
+RESULT 5/5 scenarios validate
 # every gate fails on the seeded defect and passes on the reference fix (the gates discriminate).
+# S20 overload gate: empty extraction fails, perfect extraction passes.
+# S21 acquisition gate: metric-keyed merge surfaces every conflict (recall/precision 1.0);
+#                       the value-keyed union surfaces none (recall 0.0); clean platform = no false positives.
