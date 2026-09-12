@@ -1,5 +1,7 @@
 # DataOpsBench
 
+[![NVIDIA Inception](https://img.shields.io/badge/NVIDIA-Inception%20Program%20Member-76B900.svg)](https://www.nvidia.com/en-us/startups/)
+
 A standardized, model- and framework-agnostic workload for **AI-assisted data operations** — the DataOps
 analogue of TPC-C. It doesn't ask "can an LLM write SQL?" It asks:
 
